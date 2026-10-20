@@ -17,30 +17,20 @@ import {
 } from "./firebase-init.js";
 
 import {
-  signInWithPopup,
-  OAuthProvider,
-} from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
-
-import {
-  onAuthChange,
-  getAuthState,
-  signInStaff,
-  signOutStaff,
-} from "./auth-service.js";
-import {
   buildUpdatedRecord,
   validateDraft,
   applyFieldChange,
 } from "./edit-form.js";
+
 import { saveStudentEdits } from "./student-edit-service.js";
-import { patchCachedStudent } from "./data-service.js"; // merge into the existing data-service import
+
 const { STUDENTS_COLLECTION } = window.APP_CONFIG;
 
 import {
   getAllStudents,
   collectSubjects,
   collectClasses,
-  collectTeamNames,
+  clearCaches,
   // from "./to-update.js";
 } from "./data-service.js";
 
@@ -110,7 +100,12 @@ const els = {
   adminBadge: document.getElementById("adminBadge"),
   signOutBtn: document.getElementById("signOutBtn"),
   microsoftSignInBtn: document.getElementById("microsoftSignInBtn"),
+
+  loginGate: document.getElementById("loginGate"),
+  authStatus: document.getElementById("authStatus"),
 };
+
+const loadingHTML = els.loadingState.innerHTML;
 
 const state = () => ({
   term: els.query.value,
@@ -1086,49 +1081,6 @@ els.openBulkUpdateBtn.addEventListener("click", () => {
   document.body.appendChild(modalWrapper);
 });
 
-// Auth Observer
-onAuthStateChanged(auth, async (user) => {
-  if (user) {
-    const isStaffEmail = user.email && user.email.endsWith("@hhs.co.za");
-    const tokenResult = await user
-      .getIdTokenResult()
-      .catch(() => ({ claims: {} }));
-    const hasAdminClaim = Boolean(tokenResult.claims?.admin);
-
-    isAdmin = isStaffEmail || hasAdminClaim || true;
-
-    if (els.adminBadge) els.adminBadge.textContent = `Staff: ${user.email}`;
-    els.adminBadge?.classList.remove("is-hidden");
-    els.signOutBtn?.classList.remove("is-hidden");
-    els.addStudentModalBtn?.classList.remove("is-hidden");
-    els.openBulkUpdateBtn?.classList.remove("is-hidden");
-
-    openTimetableBtn?.classList.remove("is-hidden");
-
-    els.authToggleBtn?.classList.add("is-hidden");
-    els.authPopover?.classList.add("is-hidden");
-  } else {
-    isAdmin = false;
-    els.adminBadge?.classList.add("is-hidden");
-    els.signOutBtn?.classList.add("is-hidden");
-    els.addStudentModalBtn?.classList.add("is-hidden");
-    els.openBulkUpdateBtn?.classList.add("is-hidden");
-
-    openTimetableBtn?.classList.add("is-hidden");
-
-    els.authToggleBtn?.classList.remove("is-hidden");
-
-    // --- AUTOMATICALLY OPEN AUTH POPOVER AND FOCUS EMAIL ON LOAD ---
-    if (els.authPopover) {
-      els.authPopover.classList.remove("is-hidden");
-      if (els.authEmail) {
-        // Use a short timeout to ensure the DOM elements are fully painted and interactive
-        setTimeout(() => els.authEmail.focus(), 100);
-      }
-    }
-  }
-  runSearch();
-});
 
 // Sign-In Form Listener
 const authForm = document.getElementById("authForm");
@@ -1206,16 +1158,60 @@ if (signOutBtn) {
   });
 }
 
-async function init() {
-  wireEvents();
-  initTimetableModule();
+/* ================= Auth gate ================= */
+
+// Mirrors the Firestore rules: these types may write students/teams.
+const STAFF_WRITE_TYPES = ["admin", "headStaff", "slt"];
+let authSeq = 0;
+let appLoaded = false;
+
+function showGate(message = "") {
+  els.loginGate?.classList.remove("is-hidden");
+  document.body.classList.add("no-scroll");
+  if (els.authStatus) els.authStatus.textContent = message;
+}
+
+function hideGate() {
+  els.loginGate?.classList.add("is-hidden");
+  document.body.classList.remove("no-scroll");
+}
+
+async function fetchAuthorizedProfile(user) {
+  if (!user.email) return null;
+  // Doc ID must equal the user's email, exactly as the rules expect.
+  const snap = await getDoc(doc(db, "authorized_users", user.email));
+  return snap.exists() ? snap.data() : null;
+}
+
+function applySignedOutState() {
+  isAdmin = false;
+  roster = [];
+  allAvailableTeams = [];
+  appLoaded = false;
+  clearCaches();
+  closeDrawer();
+  els.tbody.innerHTML = "";
+  els.resultsGrid.innerHTML = "";
+  els.resultCount.textContent = "";
+  els.adminBadge?.classList.add("is-hidden");
+  els.signOutBtn?.classList.add("is-hidden");
+  els.addStudentModalBtn?.classList.add("is-hidden");
+  els.openBulkUpdateBtn?.classList.add("is-hidden");
+  openTimetableBtn?.classList.add("is-hidden");
+}
+
+async function loadData() {
+  els.loadingState.innerHTML = loadingHTML;
+  els.loadingState.classList.remove("is-hidden");
+  els.tableWrap.classList.add("is-hidden");
+  els.cardsWrap.classList.add("is-hidden");
 
   try {
-    let rawRoster = await getAllStudents();
+    const rawRoster = await getAllStudents();
     roster = rawRoster.filter((student) => student && student.adminNo);
-
     await loadAvailableTeams();
   } catch (err) {
+    appLoaded = false;
     els.loadingState.innerHTML = `
       <p class="error-text">Couldn't load the student roster.</p>
       <p class="empty-hint">${err.message}</p>`;
@@ -1227,11 +1223,67 @@ async function init() {
   refreshClassOptions();
   refreshTeacherOptions();
 
-  els.loadingState.remove();
-  els.tableWrap.classList.remove("is-hidden");
+  els.loadingState.classList.add("is-hidden");
+  (currentLayout === "list" ? els.tableWrap : els.cardsWrap).classList.remove("is-hidden");
   runSearch();
 }
 
+onAuthStateChanged(auth, async (user) => {
+  const mine = ++authSeq;
 
+  if (!user) {
+    applySignedOutState();
+    showGate(); // does not clear authError, so "not authorised" messages survive
+    setTimeout(() => els.authEmail?.focus(), 100);
+    return;
+  }
+
+  showGate("Checking access…");
+
+  let profile = null;
+  try {
+    profile = await fetchAuthorizedProfile(user);
+  } catch (err) {
+    if (mine !== authSeq) return;
+    console.error("Authorization lookup failed:", err);
+    els.authError.textContent = "Could not verify your access. Please try again.";
+    await signOut(auth);
+    return;
+  }
+  if (mine !== authSeq) return; // a newer auth event superseded this one
+
+  if (!profile) {
+    els.authError.textContent = `${user.email || "This account"} is not authorised to use this site.`;
+    await signOut(auth);
+    return;
+  }
+
+  isAdmin = STAFF_WRITE_TYPES.includes(profile.type);
+
+  if (els.adminBadge) {
+    els.adminBadge.textContent = `${user.email}${profile.type ? ` · ${profile.type}` : ""}`;
+    els.adminBadge.classList.remove("is-hidden");
+  }
+  els.signOutBtn?.classList.remove("is-hidden");
+  els.addStudentModalBtn?.classList.toggle("is-hidden", !isAdmin);
+  els.openBulkUpdateBtn?.classList.toggle("is-hidden", !isAdmin);
+  openTimetableBtn?.classList.toggle("is-hidden", !isAdmin);
+
+  els.authError.textContent = "";
+  hideGate();
+
+  if (!appLoaded) {
+    appLoaded = true;
+    await loadData();
+  } else {
+    runSearch();
+  }
+});
+
+function init() {
+  wireEvents();
+  initTimetableModule();
+  showGate("Checking session…"); // replaced as soon as Firebase reports auth state
+}
 
 init();

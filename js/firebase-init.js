@@ -28,6 +28,8 @@ import {
   getAuth,
   signInWithEmailAndPassword,
   onAuthStateChanged,
+  signInWithPopup,
+  OAuthProvider,
   signOut,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
@@ -54,4 +56,6 @@ export {
   signInWithEmailAndPassword,
   onAuthStateChanged,
   signOut,
+  signInWithPopup,
+  OAuthProvider,
 };

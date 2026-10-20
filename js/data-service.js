@@ -85,14 +85,6 @@ export async function getAllStudents({ forceRefresh = false } = {}) {
   return students;
 }
 
-let teamsCache = null;
-
-export const collectTeamNames = (students) =>
-  Array.from(new Set(students.flatMap((s) => s.teamsSummary || []))).sort();
-
-export const collectTeamsForStudent = (teams, adminNo) =>
-  teams.filter((t) => (t.members || []).includes(String(adminNo)));
-
 /** Distinct, sorted subject names across the whole roster. */
 export function collectSubjects(students) {
   const set = new Set();
@@ -176,4 +168,13 @@ export function collectTeamNames(students) {
 
 export function collectTeamsForStudent(teams, adminNo) {
   return teams.filter((t) => (t.members || []).includes(String(adminNo)));
+}
+
+export function clearCaches() {
+  memoryCache = null;
+  teamsMemory = null;
+  try {
+    sessionStorage.removeItem(CACHE_KEY);
+    sessionStorage.removeItem(TEAMS_CACHE_KEY);
+  } catch { /* ignore */ }
 }
